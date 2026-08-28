@@ -4,7 +4,7 @@ cd /d "%~dp0"
 title ECHO RIFT
 where node >nul 2>nul
 if %errorlevel%==0 (
-  node server.js
+  node local-server.js
   goto :eof
 )
 where py >nul 2>nul

@@ -14,7 +14,7 @@ Double-cliquez sur `JOUER_ECHO_RIFT.html`. Cette version contient le jeu complet
 
 ### Linux ou macOS
 
-Lancez `./START_ECHO_RIFT.sh`, ou exécutez `node server.js` dans ce dossier.
+Lancez `./START_ECHO_RIFT.sh`, ou exécutez `node local-server.js` dans ce dossier.
 
 ## Contenu inclus
 
@@ -58,7 +58,7 @@ Le fichier d’export de l’Atelier contient uniquement les métadonnées ; les
 - `audio-engine.js` : synthèse Web Audio, effets de fracture et visualiseur.
 - `storage.js` : progression locale et bibliothèque IndexedDB.
 - `game.js` : navigation, manches, scoring, modes, modules et progression.
-- `server.js` : serveur local Node.js sans dépendance.
+- `local-server.js` : serveur local Node.js sans dépendance.
 - `sw.js` et `manifest.webmanifest` : installation et fonctionnement hors ligne.
 - `tests/` : tests automatisés Playwright et captures de référence.
 
