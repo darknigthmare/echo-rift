@@ -1,0 +1,12 @@
+{
+  "name": "ECHO RIFT — Blind test vidéoludique",
+  "short_name": "ECHO RIFT",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#080b18",
+  "theme_color": "#080b18",
+  "description": "Blind test jouable en solo, en multijoueur local et avec vos propres fichiers audio.",
+  "icons": [
+    { "src": "assets/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}

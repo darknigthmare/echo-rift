@@ -1,0 +1,3 @@
+ECHO RIFT
+Version 1.0.0 — édition jouable complète
+25 août 2026
