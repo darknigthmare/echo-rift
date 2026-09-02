@@ -3,9 +3,13 @@
 
   const PROFILE_KEY = 'echo-rift-profile-v1';
   const SETTINGS_KEY = 'echo-rift-settings-v1';
+  const ACTIVE_SESSION_KEY = 'echo-rift-active-session-v1';
+  const ACTIVE_SESSION_MAX_AGE = 14 * 24 * 60 * 60 * 1000;
   const DB_NAME = 'echo-rift-audio-library';
   const DB_VERSION = 1;
   const STORE_NAME = 'tracks';
+  const MAX_AUDIO_FILE_SIZE = 100 * 1024 * 1024;
+  const AUDIO_EXTENSION = /\.(aac|flac|m4a|mp3|oga|ogg|opus|wav|webm)$/i;
 
   const defaultProfile = () => ({
     name: 'Récupérateur',
@@ -20,12 +24,13 @@
     discovered: [],
     achievements: [],
     campaign: {},
-    lastMode: 'solo'
+    lastMode: 'solo',
+    onboardingComplete: false
   });
 
   const defaultSettings = () => ({
     volume: 0.72,
-    reducedMotion: false,
+    reducedMotion: Boolean(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches),
     highContrast: false,
     visualizer: true,
     screenShake: true,
@@ -41,30 +46,117 @@
     }
   }
 
-  function loadProfile() {
+  function finiteNumber(value, fallback = 0, minimum = 0, maximum = Number.MAX_SAFE_INTEGER) {
+    const number = Number(value);
+    if (!Number.isFinite(number)) return fallback;
+    return Math.min(maximum, Math.max(minimum, number));
+  }
+
+  function normalizeProfile(stored) {
     const fallback = defaultProfile();
+    const source = stored && typeof stored === 'object' ? stored : {};
+    const campaign = {};
+    if (source.campaign && typeof source.campaign === 'object' && !Array.isArray(source.campaign)) {
+      Object.entries(source.campaign).forEach(([id, result]) => {
+        if (!id || id === '__proto__' || !result || typeof result !== 'object') return;
+        campaign[id] = {
+          stars: Math.round(finiteNumber(result.stars, 0, 0, 3)),
+          best: Math.round(finiteNumber(result.best))
+        };
+      });
+    }
+    return {
+      name: typeof source.name === 'string' && source.name.trim() ? source.name.trim().slice(0, 18) : fallback.name,
+      level: Math.max(1, Math.round(finiteNumber(source.level, fallback.level, 1, 10000))),
+      xp: Math.round(finiteNumber(source.xp)),
+      credits: Math.round(finiteNumber(source.credits)),
+      gamesPlayed: Math.round(finiteNumber(source.gamesPlayed)),
+      correctAnswers: Math.round(finiteNumber(source.correctAnswers)),
+      totalAnswers: Math.round(finiteNumber(source.totalAnswers)),
+      bestScore: Math.round(finiteNumber(source.bestScore)),
+      bestStreak: Math.round(finiteNumber(source.bestStreak)),
+      discovered: Array.isArray(source.discovered) ? Array.from(new Set(source.discovered.filter(id => typeof id === 'string'))) : [],
+      achievements: Array.isArray(source.achievements) ? Array.from(new Set(source.achievements.filter(id => typeof id === 'string'))) : [],
+      campaign,
+      lastMode: ['solo', 'party', 'endless', 'campaign'].includes(source.lastMode) ? source.lastMode : fallback.lastMode,
+      onboardingComplete: Boolean(source.onboardingComplete)
+    };
+  }
+
+  function loadProfile() {
     let raw = null;
     try { raw = localStorage.getItem(PROFILE_KEY); } catch (_) { raw = null; }
-    const stored = safeParse(raw, fallback);
-    return Object.assign(fallback, stored, {
-      discovered: Array.isArray(stored.discovered) ? stored.discovered : [],
-      achievements: Array.isArray(stored.achievements) ? stored.achievements : [],
-      campaign: stored.campaign && typeof stored.campaign === 'object' ? stored.campaign : {}
-    });
+    return normalizeProfile(safeParse(raw, {}));
   }
 
   function saveProfile(profile) {
-    try { localStorage.setItem(PROFILE_KEY, JSON.stringify(profile)); } catch (_) { /* stockage désactivé */ }
+    try {
+      localStorage.setItem(PROFILE_KEY, JSON.stringify(normalizeProfile(profile)));
+      return true;
+    } catch (_) {
+      return false;
+    }
   }
 
   function loadSettings() {
     let raw = null;
     try { raw = localStorage.getItem(SETTINGS_KEY); } catch (_) { raw = null; }
-    return Object.assign(defaultSettings(), safeParse(raw, {}));
+    const fallback = defaultSettings();
+    const stored = safeParse(raw, {});
+    return {
+      volume: finiteNumber(stored.volume, fallback.volume, 0, 1),
+      reducedMotion: stored.reducedMotion == null ? fallback.reducedMotion : Boolean(stored.reducedMotion),
+      highContrast: Boolean(stored.highContrast),
+      visualizer: stored.visualizer == null ? fallback.visualizer : Boolean(stored.visualizer),
+      screenShake: stored.screenShake == null ? fallback.screenShake : Boolean(stored.screenShake),
+      language: 'fr'
+    };
   }
 
   function saveSettings(settings) {
-    try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch (_) { /* stockage désactivé */ }
+    try {
+      localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function loadActiveSession() {
+    let raw = null;
+    try { raw = localStorage.getItem(ACTIVE_SESSION_KEY); } catch (_) { raw = null; }
+    const stored = safeParse(raw, null);
+    const valid = stored
+      && stored.schemaVersion === 1
+      && Number.isFinite(stored.savedAt)
+      && Date.now() - stored.savedAt <= ACTIVE_SESSION_MAX_AGE
+      && stored.config && typeof stored.config === 'object'
+      && Array.isArray(stored.players) && stored.players.length >= 1 && stored.players.length <= 4
+      && Number.isInteger(stored.questionIndex) && stored.questionIndex >= 0
+      && stored.question && typeof stored.question === 'object'
+      && ['paused', 'answering', 'loading', 'reveal'].includes(stored.phase);
+    if (valid) return stored;
+    if (raw) clearActiveSession();
+    return null;
+  }
+
+  function saveActiveSession(snapshot) {
+    try {
+      const payload = Object.assign({}, snapshot, { schemaVersion: 1, savedAt: Date.now() });
+      localStorage.setItem(ACTIVE_SESSION_KEY, JSON.stringify(payload));
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function clearActiveSession() {
+    try {
+      localStorage.removeItem(ACTIVE_SESSION_KEY);
+      return true;
+    } catch (_) {
+      return false;
+    }
   }
 
   function resetProfile() {
@@ -87,6 +179,11 @@
       gainedLevels += 1;
     }
     return gainedLevels;
+  }
+
+  function isSupportedAudioFile(file) {
+    if (!file || finiteNumber(file.size, 0, 0) <= 0 || file.size > MAX_AUDIO_FILE_SIZE) return false;
+    return Boolean((file.type && file.type.startsWith('audio/')) || AUDIO_EXTENSION.test(file.name || ''));
   }
 
   function openDb() {
@@ -132,7 +229,7 @@
   }
 
   async function addCustomFiles(files, defaults = {}) {
-    const accepted = Array.from(files || []).filter(file => file && file.type && file.type.startsWith('audio/'));
+    const accepted = Array.from(files || []).filter(isSupportedAudioFile);
     if (!accepted.length) return [];
 
     const records = accepted.map((file, index) => {
@@ -234,8 +331,12 @@
     loadSettings,
     saveSettings,
     resetProfile,
+    loadActiveSession,
+    saveActiveSession,
+    clearActiveSession,
     addXp,
     xpForLevel,
+    isSupportedAudioFile,
     addCustomFiles,
     getCustomTracks,
     getCustomTrackRecord,

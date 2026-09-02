@@ -3,6 +3,8 @@
 
   const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
   const OfflineAudioContextCtor = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+  const MAX_BUFFER_CACHE = 12;
+  const MAX_REVERSE_CACHE = 4;
 
   function mulberry32(seed) {
     let value = seed >>> 0;
@@ -29,6 +31,7 @@
       this.master = null;
       this.analyser = null;
       this.currentSources = [];
+      this.graphNodes = [];
       this.bufferCache = new Map();
       this.reverseCache = new Map();
       this.lastPlayback = null;
@@ -38,6 +41,7 @@
       this.visualizerEnabled = true;
       this.visualizerFrame = 0;
       this.loading = new Map();
+      this.operationId = 0;
     }
 
     async ensureContext() {
@@ -57,18 +61,39 @@
     }
 
     attachVisualizer(canvas) {
+      if (this.visualizerFrame) cancelAnimationFrame(this.visualizerFrame);
+      this.visualizerFrame = 0;
       this.canvas = canvas || null;
       this.canvasContext = canvas ? canvas.getContext('2d') : null;
-      if (canvas && !this.visualizerFrame) this.drawVisualizer();
+      if (canvas && this.visualizerEnabled) this.drawVisualizer();
     }
 
     setVisualizerEnabled(enabled) {
       this.visualizerEnabled = Boolean(enabled);
+      if (!this.visualizerEnabled && this.visualizerFrame) {
+        cancelAnimationFrame(this.visualizerFrame);
+        this.visualizerFrame = 0;
+      }
+      if (this.canvasContext && this.canvas) {
+        this.canvasContext.clearRect(0, 0, this.canvas.width || 1, this.canvas.height || 1);
+      }
+      if (this.visualizerEnabled && this.canvas && !this.visualizerFrame) this.drawVisualizer();
+    }
+
+    rememberBuffer(cache, key, buffer, maximum) {
+      if (cache.has(key)) cache.delete(key);
+      cache.set(key, buffer);
+      while (cache.size > maximum) cache.delete(cache.keys().next().value);
+      return buffer;
     }
 
     async getBuffer(track) {
       if (!track) throw new Error('Écho audio manquant.');
-      if (this.bufferCache.has(track.id)) return this.bufferCache.get(track.id);
+      if (this.bufferCache.has(track.id)) {
+        const cached = this.bufferCache.get(track.id);
+        this.rememberBuffer(this.bufferCache, track.id, cached, MAX_BUFFER_CACHE);
+        return cached;
+      }
       if (this.loading.has(track.id)) return this.loading.get(track.id);
 
       const promise = track.sourceType === 'custom'
@@ -77,8 +102,7 @@
       this.loading.set(track.id, promise);
       try {
         const buffer = await promise;
-        this.bufferCache.set(track.id, buffer);
-        return buffer;
+        return this.rememberBuffer(this.bufferCache, track.id, buffer, MAX_BUFFER_CACHE);
       } finally {
         this.loading.delete(track.id);
       }
@@ -474,15 +498,18 @@
 
     getReversedBuffer(buffer, cacheKey) {
       const key = `reverse:${cacheKey}`;
-      if (this.reverseCache.has(key)) return this.reverseCache.get(key);
+      if (this.reverseCache.has(key)) {
+        const cached = this.reverseCache.get(key);
+        this.rememberBuffer(this.reverseCache, key, cached, MAX_REVERSE_CACHE);
+        return cached;
+      }
       const reversed = this.context.createBuffer(buffer.numberOfChannels, buffer.length, buffer.sampleRate);
       for (let channel = 0; channel < buffer.numberOfChannels; channel += 1) {
         const source = buffer.getChannelData(channel);
         const target = reversed.getChannelData(channel);
         for (let i = 0, j = source.length - 1; i < source.length; i += 1, j -= 1) target[i] = source[j];
       }
-      this.reverseCache.set(key, reversed);
-      return reversed;
+      return this.rememberBuffer(this.reverseCache, key, reversed, MAX_REVERSE_CACHE);
     }
 
     createPlaybackGraph(options = {}) {
@@ -494,6 +521,7 @@
       this.analyser.smoothingTimeConstant = 0.78;
 
       let input = this.master;
+      this.graphNodes = [this.master, this.analyser];
       if (options.filterFrequency || options.highpassFrequency) {
         const filter = ctx.createBiquadFilter();
         if (options.highpassFrequency) {
@@ -506,13 +534,15 @@
         filter.Q.value = options.filterQ || 1.1;
         filter.connect(this.master);
         input = filter;
+        this.graphNodes.push(filter);
       }
       this.master.connect(this.analyser);
       this.analyser.connect(ctx.destination);
       return input;
     }
 
-    stop(fade = 0.035) {
+    stop(fade = 0.035, invalidatePending = true) {
+      if (invalidatePending) this.operationId += 1;
       if (this.master && this.context) {
         try {
           this.master.gain.cancelScheduledValues(this.context.currentTime);
@@ -521,19 +551,28 @@
         } catch (_) { /* no-op */ }
       }
       const sources = this.currentSources.slice();
+      const graphNodes = this.graphNodes.slice();
       this.currentSources.length = 0;
+      this.graphNodes.length = 0;
+      this.master = null;
+      this.analyser = null;
       setTimeout(() => {
         sources.forEach(source => {
           try { source.stop(); } catch (_) { /* already stopped */ }
           try { source.disconnect(); } catch (_) { /* no-op */ }
         });
+        graphNodes.forEach(node => {
+          try { node.disconnect(); } catch (_) { /* no-op */ }
+        });
       }, Math.ceil((fade + 0.02) * 1000));
     }
 
     async play(track, options = {}) {
+      const operationId = ++this.operationId;
       await this.ensureContext();
-      this.stop();
       const bufferOriginal = await this.getBuffer(track);
+      if (operationId !== this.operationId) return { cancelled: true };
+      this.stop(0.035, false);
       const buffer = options.reverse ? this.getReversedBuffer(bufferOriginal, track.id) : bufferOriginal;
       const source = this.context.createBufferSource();
       source.buffer = buffer;
@@ -553,9 +592,11 @@
     }
 
     async playSequence(tracks, segmentDuration = 1.4, options = {}) {
+      const operationId = ++this.operationId;
       await this.ensureContext();
-      this.stop();
       const buffers = await Promise.all(tracks.map(track => this.getBuffer(track)));
+      if (operationId !== this.operationId) return { cancelled: true };
+      this.stop(0.035, false);
       const graphInput = this.createPlaybackGraph(options);
       const sources = [];
       let cursor = this.context.currentTime + 0.04;
@@ -585,8 +626,11 @@
     }
 
     drawVisualizer() {
+      if (!this.canvas || !this.canvasContext || !this.visualizerEnabled) {
+        this.visualizerFrame = 0;
+        return;
+      }
       this.visualizerFrame = requestAnimationFrame(() => this.drawVisualizer());
-      if (!this.canvas || !this.canvasContext) return;
       const canvas = this.canvas;
       const ctx = this.canvasContext;
       const rect = canvas.getBoundingClientRect();

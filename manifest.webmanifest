@@ -1,7 +1,9 @@
 {
   "name": "ECHO RIFT — Blind test vidéoludique",
   "short_name": "ECHO RIFT",
-  "start_url": "./index.html",
+  "id": "./",
+  "start_url": "./",
+  "scope": "./",
   "display": "standalone",
   "background_color": "#080b18",
   "theme_color": "#080b18",

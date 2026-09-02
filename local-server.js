@@ -8,6 +8,7 @@ const { exec } = require('child_process');
 
 const root = __dirname;
 const port = Number(process.env.PORT || 8765);
+const shouldOpenBrowser = process.env.ECHO_RIFT_NO_OPEN !== '1' && !process.argv.includes('--no-open');
 const mime = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
@@ -24,6 +25,7 @@ const mime = {
 };
 
 function openBrowser(url) {
+  if (!shouldOpenBrowser) return;
   const command = process.platform === 'win32'
     ? `start "" "${url}"`
     : process.platform === 'darwin'
@@ -33,10 +35,21 @@ function openBrowser(url) {
 }
 
 const server = http.createServer((request, response) => {
-  const raw = decodeURIComponent((request.url || '/').split('?')[0]);
+  if (!['GET', 'HEAD'].includes(request.method || 'GET')) {
+    response.writeHead(405, { 'Content-Type': 'text/plain; charset=utf-8', Allow: 'GET, HEAD' }).end('Méthode non autorisée');
+    return;
+  }
+  let raw;
+  try {
+    raw = decodeURIComponent((request.url || '/').split('?')[0]);
+  } catch (_) {
+    response.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' }).end('Adresse invalide');
+    return;
+  }
   const relative = raw === '/' ? 'index.html' : raw.replace(/^\/+/, '');
   const filePath = path.resolve(root, relative);
-  if (!filePath.startsWith(path.resolve(root))) {
+  const relativeToRoot = path.relative(path.resolve(root), filePath);
+  if (relativeToRoot.startsWith(`..${path.sep}`) || relativeToRoot === '..' || path.isAbsolute(relativeToRoot)) {
     response.writeHead(403).end('Accès refusé');
     return;
   }
@@ -47,8 +60,16 @@ const server = http.createServer((request, response) => {
     }
     response.writeHead(200, {
       'Content-Type': mime[path.extname(filePath).toLowerCase()] || 'application/octet-stream',
-      'Cache-Control': 'no-cache'
+      'Content-Length': stat.size,
+      'Cache-Control': 'no-cache',
+      'X-Content-Type-Options': 'nosniff',
+      'Referrer-Policy': 'no-referrer',
+      'Permissions-Policy': 'camera=(), microphone=(), geolocation=()'
     });
+    if (request.method === 'HEAD') {
+      response.end();
+      return;
+    }
     fs.createReadStream(filePath).pipe(response);
   });
 });

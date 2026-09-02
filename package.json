@@ -1,0 +1,22 @@
+{
+  "name": "echo-rift",
+  "version": "1.1.0",
+  "private": true,
+  "description": "Blind test vidéoludique et failles rythmiques jouable sur desktop et mobile.",
+  "scripts": {
+    "start": "node local-server.js",
+    "dev": "node local-server.js",
+    "build": "node scripts/build-standalone.mjs && node scripts/verify-static.mjs",
+    "check:syntax": "node --check content.js && node --check storage.js && node --check audio-engine.js && node --check game.js && node --check local-server.js && node --check scripts/build-standalone.mjs && node --check scripts/verify-static.mjs && node --check playwright.config.mjs && node --check tests/helpers.js && node --check tests/onboarding-solo.spec.js && node --check tests/party-mobile.spec.js && node --check tests/modes.spec.js",
+    "check": "npm run check:syntax && node scripts/verify-static.mjs",
+    "test": "playwright test",
+    "test:headed": "playwright test --headed",
+    "qa": "npm run build && npm run check:syntax && npm test"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.62.1"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

@@ -1,6 +1,10 @@
-# ECHO RIFT — version jouable complète
+# ECHO RIFT — v1.1.0
 
 ECHO RIFT est un blind test transformé en jeu vidéo de science-fiction. Il fonctionne entièrement dans un navigateur moderne, sans compte, sans connexion obligatoire et sans dépendance externe.
+
+## Production officielle
+
+La production ECHO RIFT autorisée est exclusivement **https://echo-rift-opal.vercel.app**. Le projet Vercel lié est `echo-rift` (`prj_K2o2J63NF0kbQHkZM3dILqHqcCAV`). Toute publication doit être contrôlée sur cet alias après déploiement.
 
 ## Lancer le jeu
 
@@ -21,7 +25,7 @@ Lancez `./START_ECHO_RIFT.sh`, ou exécutez `node local-server.js` dans ce dossi
 - 72 échos originaux générés en temps réel : 60 compositions et 12 bruitages.
 - 11 familles sonores : arcade, horreur, science-fiction, fantasy, cyber, industriel, abysses, désert, onirique, mystère et bruits iconiques.
 - Course solo avec score, rapidité, séries et progression.
-- Party local simultané de 2 à 4 joueurs.
+- Party local de 2 à 4 joueurs avec clavier, manettes et sélection tactile par joueur.
 - Faille infinie avec trois vies.
 - Campagne Archive Run en cinq secteurs, étoiles et boss final.
 - Cinq types de manches : classique, univers sonore, éclair, fracture et mémoire.
@@ -29,6 +33,8 @@ Lancez `./START_ECHO_RIFT.sh`, ou exécutez `node local-server.js` dans ce dossi
 - Musée sonore d’entraînement avec recherche et filtres.
 - Atelier permettant d’importer ses propres fichiers MP3, WAV, OGG, M4A et autres formats pris en charge par le navigateur.
 - Sauvegarde locale des niveaux, scores, succès, découvertes, réglages et campagne.
+- Onboarding audio au premier lancement et reprise versionnée d’une partie interrompue.
+- États de victoire, défaite, secteur non stabilisé et erreur audio sans pénalité injuste.
 - Support souris, tactile, clavier et manettes via la Gamepad API.
 - Réglages de volume, contraste renforcé et réduction des mouvements.
 - Application web installable et utilisable hors ligne lorsqu’elle est lancée par le serveur local.
@@ -42,7 +48,7 @@ Lancez `./START_ECHO_RIFT.sh`, ou exécutez `node local-server.js` dans ce dossi
 | J3 | A | S | D | F |
 | J4 | Z | X | C | V |
 
-En solo, les portails peuvent aussi être sélectionnés à la souris ou au toucher. `Entrée` ou `Espace` passe à la question suivante après la révélation. `Échap` propose de quitter la partie.
+En solo, les portails peuvent aussi être sélectionnés à la souris ou au toucher. En Party sur écran tactile, sélectionnez d’abord le joueur dans la barre dédiée, puis sa réponse ; les choix restent masqués jusqu’à la révélation. `Entrée` ou `Espace` passe à la question suivante après la révélation. `Échap` propose de quitter la partie.
 
 ## Bibliothèque personnelle
 
@@ -60,27 +66,30 @@ Le fichier d’export de l’Atelier contient uniquement les métadonnées ; les
 - `game.js` : navigation, manches, scoring, modes, modules et progression.
 - `local-server.js` : serveur local Node.js sans dépendance.
 - `sw.js` et `manifest.webmanifest` : installation et fonctionnement hors ligne.
-- `tests/` : tests automatisés Playwright et captures de référence.
+- `scripts/` : génération déterministe de la version autonome et contrôle du contenu livré.
+- `tests/` : parcours automatisés Playwright sur serveur HTTP réel, desktop et mobile.
+- `.vercelignore` : liste explicite des fichiers internes exclus de la production.
 
-## Tests exécutés
-
-- Chargement sans erreur JavaScript.
-- Navigation des menus principaux.
-- Partie solo complète de huit questions avec écran de résultats.
-- Calcul des scores, séries, progression et sauvegarde de profil.
-- Party local à quatre joueurs avec quatre claviers de touches distincts.
-- Utilisation du module Analyse et validation simultanée des réponses.
-- Affichage des cinq secteurs de campagne.
-- Présence des 72 cartes dans le Musée sonore.
-- Modification des paramètres de profil.
-
-Pour relancer les tests dans un environnement possédant Python, Playwright et Chromium :
+## Validation locale
 
 ```bash
-python tests/smoke_test.py
-python tests/party_test.py
+npm ci
+npx playwright install chromium
+npm run qa
 ```
+
+`npm run build` régénère `JOUER_ECHO_RIFT.html` depuis les sources avant de vérifier la version, les 72 échos, la PWA, l’URL de production et les exclusions Vercel. `npm test` exécute les parcours essentiels dans Chromium.
+
+## Publication
+
+```bash
+npm run qa
+npx vercel --prod --yes
+npx vercel inspect https://echo-rift-opal.vercel.app
+```
+
+Ne pas utiliser un ancien dossier `.vercel/output` avec `--prebuilt` : ce projet est publié depuis la racine statique contrôlée. Vérifiez ensuite le statut `Ready`, l’alias officiel et la réponse HTTP 200.
 
 ## Droits et audio
 
-Le code, les noms fictifs, les compositions procédurales et les bruitages inclus ont été créés pour ce prototype. Aucun extrait musical commercial ou contenu sous licence tierce n’est fourni. Les fichiers importés par l’utilisateur restent sous sa responsabilité et ne sont pas redistribués par le jeu.
+Le code, les noms fictifs, les compositions procédurales et les bruitages inclus ont été créés pour ECHO RIFT. Aucun extrait musical commercial ou contenu sous licence tierce n’est fourni. Les fichiers importés par l’utilisateur restent sous sa responsabilité et ne sont pas redistribués par le jeu.

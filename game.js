@@ -26,7 +26,7 @@
   };
 
   const MODE_INFO = {
-    solo: { label: 'Course solo', icon: '✦', description: 'Dix à vingt échos, score, séries et modules.' },
+    solo: { label: 'Course solo', icon: '✦', description: 'Huit à vingt échos, score, séries et modules.' },
     party: { label: 'Party local', icon: '◫', description: 'Deux à quatre joueurs répondent simultanément sur le même clavier.' },
     endless: { label: 'Faille infinie', icon: '∞', description: 'Trois vies. Continue tant que ton oreille tient le choc.' }
   };
@@ -104,11 +104,12 @@
       this.profile = Storage.loadProfile();
       this.settings = Storage.loadSettings();
       this.customTracks = [];
-      this.currentScreen = 'home';
+      this.currentScreen = '';
       this.setupMode = 'solo';
       this.setupDraft = null;
       this.session = null;
       this.timerFrame = 0;
+      this.revealTimeout = 0;
       this.timerStart = 0;
       this.timerDuration = 0;
       this.remainingMs = 0;
@@ -116,10 +117,14 @@
       this.gamepadState = new Map();
       this.previewTrackId = null;
       this.pendingImport = false;
+      this.savedSession = null;
+      this.touchPlayerIndex = 0;
+      this.audioError = null;
       this.boundKeydown = event => this.onKeydown(event);
       this.boundClick = event => this.onClick(event);
       this.boundChange = event => this.onChange(event);
       this.boundInput = event => this.onInput(event);
+      this.boundVisibilityChange = () => this.onVisibilityChange();
     }
 
     async init() {
@@ -128,10 +133,17 @@
       document.addEventListener('click', this.boundClick);
       document.addEventListener('change', this.boundChange);
       document.addEventListener('input', this.boundInput);
+      document.addEventListener('visibilitychange', this.boundVisibilityChange);
       window.addEventListener('keydown', this.boundKeydown);
-      window.addEventListener('beforeunload', () => Audio.stop(0));
+      window.addEventListener('pagehide', () => this.persistActiveSession());
+      window.addEventListener('beforeunload', () => {
+        this.persistActiveSession();
+        Audio.stop(0);
+      });
       this.customTracks = await this.safeLoadCustomTracks();
-      this.renderHome();
+      this.savedSession = Storage.loadActiveSession();
+      if (this.profile.onboardingComplete) this.renderHome();
+      else this.renderOnboarding();
       this.pollGamepads();
       if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
         navigator.serviceWorker.register('./sw.js').catch(() => {});
@@ -156,7 +168,7 @@
       document.documentElement.classList.toggle('reduced-motion', Boolean(this.settings.reducedMotion));
       document.documentElement.classList.toggle('high-contrast', Boolean(this.settings.highContrast));
       Audio.setVolume(this.settings.volume);
-      Audio.setVisualizerEnabled(this.settings.visualizer);
+      Audio.setVisualizerEnabled(this.settings.visualizer && !this.settings.reducedMotion);
     }
 
     updateProfileChip() {
@@ -170,14 +182,24 @@
     }
 
     setScreen(name, html) {
+      const sameScreen = this.currentScreen === name;
+      const activeElement = document.activeElement;
+      const activeId = sameScreen && activeElement && activeElement.id ? activeElement.id : null;
+      const selectionStart = activeId && typeof activeElement.selectionStart === 'number' ? activeElement.selectionStart : null;
       Audio.attachVisualizer(null);
       this.currentScreen = name;
       this.screen.classList.remove('screen-enter');
       this.screen.innerHTML = html;
       void this.screen.offsetWidth;
       this.screen.classList.add('screen-enter');
-      this.screen.focus({ preventScroll: true });
-      window.scrollTo({ top: 0, behavior: this.settings.reducedMotion ? 'auto' : 'smooth' });
+      const restored = activeId ? document.getElementById(activeId) : null;
+      if (restored && !restored.disabled) {
+        restored.focus({ preventScroll: true });
+        if (selectionStart != null && typeof restored.setSelectionRange === 'function') restored.setSelectionRange(selectionStart, selectionStart);
+      } else if (!sameScreen) {
+        this.screen.focus({ preventScroll: true });
+        window.scrollTo({ top: 0, behavior: this.settings.reducedMotion ? 'auto' : 'smooth' });
+      }
     }
 
     toast(message, type = 'info') {
@@ -192,9 +214,52 @@
       }, 3200);
     }
 
+    renderOnboarding() {
+      this.cancelTimer();
+      Audio.stop();
+      this.setScreen('onboarding', `
+        <section class="onboarding-page">
+          <div class="onboarding-hero panel">
+            <span class="kicker">BIENVENUE DANS L’ARCHIVE</span>
+            <h1>Écoute le signal.<br><span>Stabilise la faille.</span></h1>
+            <p>ECHO RIFT transforme le blind test en course rythmique. Tout se joue à l’oreille, sans compte et avec sauvegarde locale automatique.</p>
+            <button class="audio-calibration" type="button" data-action="onboarding-audio"><span>▶</span><strong>Tester le signal audio</strong><small>Extrait original de 2 secondes</small></button>
+          </div>
+          <div class="onboarding-steps">
+            <article class="panel"><span>01</span><h2>Écoute</h2><p>Un écho original, un bruitage ou une séquence mémoire traverse la faille.</p></article>
+            <article class="panel"><span>02</span><h2>Réponds</h2><p>Touche un portail ou utilise 1 à 4. Une réponse rapide renforce ton score et ta série.</p></article>
+            <article class="panel"><span>03</span><h2>Progresse</h2><p>Campagne, niveaux et succès sont conservés. Une partie interrompue peut être reprise.</p></article>
+          </div>
+          <div class="onboarding-actions">
+            <button class="button primary large" data-action="onboarding-play">Configurer ma première faille →</button>
+            <button class="button ghost large" data-action="onboarding-home">Explorer l’accueil</button>
+          </div>
+          <p class="onboarding-note">Conseil : active le son de l’appareil avant de commencer. Les réglages d’accessibilité restent disponibles via ⚙.</p>
+        </section>
+      `);
+    }
+
+    completeOnboarding(startPlaying) {
+      this.profile.onboardingComplete = true;
+      if (!Storage.saveProfile(this.profile)) this.toast('Le stockage local est indisponible : la progression pourrait ne pas être conservée.', 'warning');
+      this.updateProfileChip();
+      if (startPlaying) this.renderSetup('solo');
+      else this.renderHome();
+    }
+
+    async testOnboardingAudio() {
+      try {
+        await Audio.play(TRACKS[0], { duration: 2 });
+        this.toast('Signal reçu. Le niveau audio est opérationnel.', 'success');
+      } catch (error) {
+        this.toast(`Audio indisponible : ${error.message}`, 'error');
+      }
+    }
+
     renderHome() {
       this.cancelTimer();
       Audio.stop();
+      this.savedSession = Storage.loadActiveSession();
       const profileAccuracy = accuracy(this.profile.correctAnswers, this.profile.totalAnswers);
       const campaignStars = Object.values(this.profile.campaign || {}).reduce((sum, item) => sum + Number(item.stars || 0), 0);
       const customReady = this.customTracks.length >= 4;
@@ -202,6 +267,10 @@
       const lastAchievement = this.profile.achievements.length
         ? ACHIEVEMENTS.find(item => item.id === this.profile.achievements[this.profile.achievements.length - 1])
         : null;
+      const resumable = this.savedSession;
+      const resumableMode = resumable && resumable.config.mode === 'campaign'
+        ? 'Archive Run'
+        : resumable && MODE_INFO[resumable.config.mode] ? MODE_INFO[resumable.config.mode].label : 'Partie en cours';
 
       this.setScreen('home', `
         <section class="home-layout">
@@ -210,8 +279,10 @@
             <h1>Écoute.<br><span>Choisis ta faille.</span></h1>
             <p>Un blind test transformé en jeu vidéo : réponses simultanées, risques de vitesse, pouvoirs tactiques, campagne et bibliothèque audio personnelle.</p>
             <div class="hero-actions">
-              <button class="button primary large" data-action="setup" data-mode="${escapeHtml(this.profile.lastMode || 'solo')}">Jouer maintenant <span>→</span></button>
-              <button class="button ghost large" data-action="campaign">Continuer l’Archive</button>
+              ${resumable
+                ? '<button class="button primary large" data-action="resume-session">Reprendre la faille <span>→</span></button>'
+                : `<button class="button primary large" data-action="setup" data-mode="${escapeHtml(this.profile.lastMode || 'solo')}">Jouer maintenant <span>→</span></button>`}
+              <button class="button ghost large" data-action="${resumable ? 'setup' : 'campaign'}" ${resumable ? `data-mode="${escapeHtml(this.profile.lastMode || 'solo')}"` : ''}>${resumable ? 'Nouvelle partie' : 'Continuer l’Archive'}</button>
             </div>
             <div class="hero-flags">
               <span>72 échos originaux</span><span>1–4 joueurs</span><span>Hors ligne</span><span>Import audio</span>
@@ -233,6 +304,14 @@
           </aside>
         </section>
 
+        ${resumable ? `
+          <section class="resume-card panel" role="status">
+            <span class="resume-icon">↻</span>
+            <div><small>SAUVEGARDE AUTOMATIQUE</small><h2>${escapeHtml(resumableMode)} · signal ${Number(resumable.questionIndex || 0) + 1}</h2><p>Reprends exactement à la dernière manche sauvegardée, sans perdre ton score.</p></div>
+            <div class="resume-actions"><button class="button primary" data-action="resume-session">Continuer</button><button class="text-button" data-action="discard-session">Abandonner cette partie</button></div>
+          </section>
+        ` : ''}
+
         <section class="section-block">
           <div class="section-title"><div><span class="kicker">MODES DE JEU</span><h2>Choisis ton signal</h2></div><span class="section-rule"></span></div>
           <div class="mode-grid">
@@ -248,6 +327,16 @@
               <span class="mode-copy"><strong>Archive Run</strong><small>Cinq secteurs, difficulté progressive et medley final.</small></span>
               <span class="mode-arrow">→</span>
             </button>
+          </div>
+        </section>
+
+        <section class="section-block">
+          <div class="section-title"><div><span class="kicker">MAÎTRISE</span><h2>Succès de l’Archive</h2></div><strong class="achievement-count">${this.profile.achievements.length} / ${ACHIEVEMENTS.length}</strong></div>
+          <div class="achievement-grid">
+            ${ACHIEVEMENTS.map(item => {
+              const unlocked = this.profile.achievements.includes(item.id);
+              return `<article class="achievement-card panel ${unlocked ? 'unlocked' : 'locked'}"><span aria-hidden="true">${unlocked ? item.icon : '◇'}</span><div><strong>${escapeHtml(item.title)}</strong><small>${escapeHtml(item.description)}</small></div><b>${unlocked ? 'ACQUIS' : 'À DÉBLOQUER'}</b></article>`;
+            }).join('')}
           </div>
         </section>
 
@@ -323,7 +412,7 @@
             </section>
 
             <section class="panel form-section" id="category-section">
-              <div class="form-section-title"><span>03</span><div><h2>Univers sonores</h2><p>Sélectionne au moins quatre familles pour des choix variés.</p></div></div>
+              <div class="form-section-title"><span>03</span><div><h2>Univers sonores</h2><p>Sélectionne au moins une famille ; le jeu compose toujours quatre choix distincts.</p></div></div>
               <div class="chip-grid">
                 ${Object.values(CATEGORIES).map(category => `
                   <label class="check-chip" style="--chip-accent:${category.accent}">
@@ -411,6 +500,10 @@
         this.toast('Sélectionne au moins un type de manche.', 'warning');
         return;
       }
+      if (source === 'custom' && types.every(type => type === 'signal')) {
+        this.toast('Le type Univers sonore nécessite l’Archive originale. Ajoute un autre type de manche.', 'warning');
+        return;
+      }
       if ((source === 'custom' || source === 'mixed') && this.customTracks.length < 4) {
         this.toast('Importe au moins quatre fichiers audio.', 'warning');
         return;
@@ -444,12 +537,171 @@
         categoryLabel: 'Bibliothèque personnelle',
         seed: track.seed || hashString(track.id)
       }));
-      if (config.source === 'custom') return custom;
-      if (config.source === 'mixed') return builtin.concat(custom);
-      return builtin;
+      const selected = config.source === 'custom' ? custom : config.source === 'mixed' ? builtin.concat(custom) : builtin;
+      return uniqueBy(selected, track => String(track.title || track.id).trim().toLocaleLowerCase('fr-FR'));
+    }
+
+    normalizeSessionConfig(source) {
+      const config = source && typeof source === 'object' ? source : {};
+      const mode = ['solo', 'party', 'endless', 'campaign'].includes(config.mode) ? config.mode : 'solo';
+      const categories = Array.isArray(config.categories) ? config.categories.filter(id => CATEGORIES[id]) : [];
+      const types = Array.isArray(config.types) ? config.types.filter(id => QUESTION_TYPES[id]) : [];
+      const names = Array.isArray(config.playerNames) ? config.playerNames.slice(0, 4).map((name, index) => String(name || `Joueur ${index + 1}`).slice(0, 18)) : [this.profile.name];
+      return {
+        mode,
+        playerNames: names.length ? names : [this.profile.name],
+        difficulty: ['discovery', 'standard', 'expert'].includes(config.difficulty) ? config.difficulty : 'standard',
+        questionCount: mode === 'endless' ? 999 : Math.round(clamp(Number(config.questionCount) || 12, 1, 999)),
+        source: ['builtin', 'custom', 'mixed'].includes(config.source) ? config.source : 'builtin',
+        categories: categories.length ? categories : Object.keys(CATEGORIES),
+        types: types.length ? types : ['classic'],
+        modules: Boolean(config.modules)
+      };
+    }
+
+    persistActiveSession() {
+      const session = this.session;
+      if (!session || !session.question || this.currentScreen === 'results') return false;
+      const phase = ['reveal', 'answering', 'paused'].includes(session.phase) ? session.phase : 'paused';
+      const snapshot = {
+        config: session.config,
+        campaignSectorId: session.campaignSector ? session.campaignSector.id : null,
+        players: session.players,
+        questionIndex: session.questionIndex,
+        question: session.question,
+        phase,
+        remainingMs: Math.round(clamp(this.remainingMs || session.question.timer * 1000, 1000, session.question.timer * 1000)),
+        roundLog: session.roundLog,
+        recentTrackIds: session.recentTrackIds,
+        sessionSeed: session.sessionSeed,
+        startedAt: session.startedAt,
+        maximumStreak: session.maximumStreak,
+        fastCorrect: session.fastCorrect,
+        encounteredIds: Array.from(session.encountered || []),
+        touchPlayerIndex: this.touchPlayerIndex
+      };
+      const saved = Storage.saveActiveSession(snapshot);
+      if (saved) this.savedSession = Object.assign({}, snapshot, { savedAt: Date.now() });
+      return saved;
+    }
+
+    resumeSavedSession() {
+      const snapshot = Storage.loadActiveSession();
+      if (!snapshot) {
+        this.toast('Aucune partie valide à reprendre.', 'warning');
+        this.renderHome();
+        return;
+      }
+      const config = this.normalizeSessionConfig(snapshot.config);
+      const pool = this.buildTrackPool(config);
+      const resolveTrack = track => track && pool.find(item => item.id === track.id);
+      const questionTrack = resolveTrack(snapshot.question.track);
+      const sequence = Array.isArray(snapshot.question.sequence) ? snapshot.question.sequence.map(resolveTrack) : null;
+      const validQuestion = Boolean(
+        QUESTION_TYPES[snapshot.question.type]
+        && Array.isArray(snapshot.question.options)
+        && snapshot.question.options.length === 4
+        && new Set(snapshot.question.options.map(option => option && option.id)).size === 4
+        && Number.isInteger(snapshot.question.answerIndex)
+        && snapshot.question.answerIndex >= 0
+        && snapshot.question.answerIndex <= 3
+        && (snapshot.question.type !== 'memory' || (sequence && sequence.length === 3))
+      );
+      if (pool.length < 4 || !validQuestion || !questionTrack || (sequence && sequence.some(item => !item))) {
+        Storage.clearActiveSession();
+        this.savedSession = null;
+        this.toast('Cette sauvegarde dépend de pistes qui ne sont plus disponibles.', 'error');
+        this.renderHome();
+        return;
+      }
+      const players = snapshot.players.slice(0, 4).map((saved, index) => ({
+        id: index,
+        name: String(saved.name || config.playerNames[index] || `Joueur ${index + 1}`).slice(0, 18),
+        color: PLAYER_COLORS[index],
+        score: Math.max(0, Number(saved.score) || 0),
+        combo: Math.max(0, Number(saved.combo) || 0),
+        bestCombo: Math.max(0, Number(saved.bestCombo) || 0),
+        correct: Math.max(0, Number(saved.correct) || 0),
+        wrong: Math.max(0, Number(saved.wrong) || 0),
+        answer: saved.answer == null ? null : clamp(Number(saved.answer) || 0, 0, 3),
+        answerElapsed: saved.answerElapsed == null ? null : Math.max(0, Number(saved.answerElapsed) || 0),
+        eliminated: Array.isArray(saved.eliminated) ? saved.eliminated.filter(value => Number.isInteger(value) && value >= 0 && value <= 3) : [],
+        doubleActive: Boolean(saved.doubleActive),
+        shieldActive: Boolean(saved.shieldActive),
+        perfect: saved.perfect !== false,
+        fastCorrect: Boolean(saved.fastCorrect),
+        lives: saved.lives == null ? null : Math.round(clamp(Number(saved.lives) || 0, 0, 3)),
+        modules: Object.fromEntries(Object.keys(MODULE_INFO).map(id => [id, Math.round(clamp(Number((saved.modules || {})[id]) || 0, 0, 9))]))
+      }));
+      config.playerNames = players.map(player => player.name);
+      this.session = {
+        config,
+        campaignSector: snapshot.campaignSectorId ? CAMPAIGN_SECTORS.find(item => item.id === snapshot.campaignSectorId) || null : null,
+        pool,
+        players,
+        questionIndex: snapshot.questionIndex,
+        question: Object.assign({}, snapshot.question, {
+          track: questionTrack,
+          sequence,
+          timer: clamp(Number(snapshot.question.timer) || 11, 5, 60),
+          answerIndex: snapshot.question.answerIndex
+        }),
+        phase: snapshot.phase === 'reveal' ? 'reveal' : 'paused',
+        roundLog: Array.isArray(snapshot.roundLog) ? snapshot.roundLog : [],
+        recentTrackIds: Array.isArray(snapshot.recentTrackIds) ? snapshot.recentTrackIds : [],
+        sessionSeed: Number(snapshot.sessionSeed) >>> 0,
+        startedAt: Number(snapshot.startedAt) || Date.now(),
+        maximumStreak: Math.max(0, Number(snapshot.maximumStreak) || 0),
+        fastCorrect: Boolean(snapshot.fastCorrect),
+        encountered: new Set(Array.isArray(snapshot.encounteredIds) ? snapshot.encounteredIds : [])
+      };
+      this.touchPlayerIndex = Math.round(clamp(Number(snapshot.touchPlayerIndex) || 0, 0, players.length - 1));
+      this.remainingMs = Math.round(clamp(Number(snapshot.remainingMs) || this.session.question.timer * 1000, 1000, this.session.question.timer * 1000));
+      this.audioError = null;
+      this.renderGame();
+      this.persistActiveSession();
+      this.toast(snapshot.phase === 'reveal' ? 'Partie restaurée à la dernière révélation.' : 'Partie restaurée. Relance le signal quand tu es prêt.', 'success');
+    }
+
+    discardSavedSession() {
+      if (!confirm('Abandonner définitivement la partie sauvegardée ?')) return;
+      Storage.clearActiveSession();
+      this.savedSession = null;
+      this.session = null;
+      this.lastCompletedSession = null;
+      this.toast('Partie sauvegardée abandonnée.', 'info');
+      this.renderHome();
+    }
+
+    pauseSessionForNavigation(target) {
+      if (!this.session || this.currentScreen !== 'game') return false;
+      if (!confirm('Mettre cette partie en pause ? Tu pourras la reprendre depuis l’accueil.')) return true;
+      this.cancelTimer();
+      Audio.stop();
+      if (this.session.phase !== 'reveal') this.session.phase = 'paused';
+      this.persistActiveSession();
+      this.session = null;
+      if (target === 'settings') this.renderSettings();
+      else this.renderHome();
+      return true;
+    }
+
+    onVisibilityChange() {
+      if (!this.session || this.currentScreen !== 'game') return;
+      if (!document.hidden) {
+        if (this.session.phase === 'paused') this.renderGame();
+        return;
+      }
+      if (this.session.phase === 'answering' || this.session.phase === 'loading') {
+        this.cancelTimer();
+        Audio.stop();
+        this.session.phase = 'paused';
+        this.persistActiveSession();
+      }
     }
 
     startSession(config, campaignSector = null) {
+      config = this.normalizeSessionConfig(config);
       this.cancelTimer();
       Audio.stop();
       const pool = this.buildTrackPool(config);
@@ -471,6 +723,8 @@
         eliminated: [],
         doubleActive: false,
         shieldActive: false,
+        perfect: true,
+        fastCorrect: false,
         lives: config.mode === 'endless' ? 3 : null,
         modules: {
           scan: config.modules ? 1 : 0,
@@ -491,11 +745,12 @@
         recentTrackIds: [],
         sessionSeed: Date.now() >>> 0,
         startedAt: Date.now(),
-        perfect: true,
         maximumStreak: 0,
         fastCorrect: false,
         encountered: new Set()
       };
+      this.touchPlayerIndex = 0;
+      this.audioError = null;
       this.prepareQuestion();
     }
 
@@ -555,7 +810,11 @@
         if (!sequence.some(item => item.id === track.id)) sequence[0] = track;
         common.sequence = shuffle(sequence, random);
         const target = common.sequence[1];
-        const distractors = sample(uniqueBy(session.pool.filter(item => item.id !== target.id && !common.sequence.some(seq => seq.id === item.id)), item => item.title), 3, random);
+        const distractorPool = uniqueBy(
+          common.sequence.filter(item => item.id !== target.id).concat(session.pool.filter(item => item.id !== target.id)),
+          item => item.title
+        );
+        const distractors = sample(distractorPool, 3, random);
         common.options = shuffle([target, ...distractors], random).map(item => ({ id: item.id, label: item.title, sublabel: item.artist, icon: '♫' }));
         common.answerIndex = common.options.findIndex(option => option.id === target.id);
         common.track = target;
@@ -622,41 +881,92 @@
     async prepareQuestion() {
       if (!this.session) return;
       this.cancelTimer();
-      this.session.phase = 'loading';
-      this.session.question = this.buildQuestion();
+      try {
+        this.session.question = this.buildQuestion();
+      } catch (error) {
+        console.error(error);
+        Storage.clearActiveSession();
+        this.savedSession = null;
+        this.session = null;
+        this.toast(`Impossible de générer la manche : ${error.message}`, 'error');
+        this.renderHome();
+        return;
+      }
       this.session.players.forEach(player => {
         player.answer = null;
         player.answerElapsed = null;
         player.eliminated = [];
         player.doubleActive = false;
-        player.shieldActive = false;
       });
       this.remainingMs = this.session.question.timer * 1000;
+      await this.playPreparedQuestion(this.remainingMs);
+    }
+
+    async playPreparedQuestion(initialRemainingMs) {
+      const activeSession = this.session;
+      if (!activeSession || !activeSession.question) return;
+      const question = activeSession.question;
+      activeSession.phase = 'loading';
+      this.audioError = null;
       this.renderGame();
+      this.persistActiveSession();
 
       try {
         await Audio.ensureContext();
-        if (!this.session || this.session.phase !== 'loading') return;
-        const question = this.session.question;
         if (question.type === 'memory') {
-          await Audio.playSequence(question.sequence, this.session.config.difficulty === 'expert' ? 1.0 : 1.35);
+          await Audio.playSequence(question.sequence, activeSession.config.difficulty === 'expert' ? 1.0 : 1.35);
         } else if (question.type === 'lightning') {
           await Audio.playSequence([question.track, question.track, question.track], question.audioOptions.duration || 1.05);
         } else {
           await Audio.play(question.track, question.audioOptions);
         }
-        if (!this.session || this.session.question !== question) return;
-        this.session.phase = 'answering';
-        this.startTimer(question.timer);
+        if (this.session !== activeSession || activeSession.question !== question || activeSession.phase !== 'loading') {
+          Audio.stop();
+          return;
+        }
+        if (document.hidden) {
+          activeSession.phase = 'paused';
+          this.persistActiveSession();
+          return;
+        }
+        activeSession.phase = 'answering';
+        this.startTimer(question.timer, initialRemainingMs);
         this.renderGame();
+        this.persistActiveSession();
+        if (activeSession.players.every(player => player.answer != null)) setTimeout(() => this.revealQuestion(), 450);
       } catch (error) {
         console.error(error);
-        this.toast(`Audio impossible : ${error.message}`, 'error');
-        if (this.session) {
-          this.session.phase = 'answering';
-          this.startTimer(this.session.question.timer);
+        if (this.session === activeSession && activeSession.question === question) {
+          this.cancelTimer();
+          Audio.stop();
+          activeSession.phase = 'audio-error';
+          this.audioError = error.message || 'Erreur audio inconnue';
           this.renderGame();
+          this.persistActiveSession();
         }
+      }
+    }
+
+    retryQuestionAudio() {
+      if (!this.session || !['paused', 'audio-error'].includes(this.session.phase)) return;
+      this.playPreparedQuestion(this.remainingMs || this.session.question.timer * 1000);
+    }
+
+    skipAudioQuestion() {
+      const session = this.session;
+      if (!session || session.phase !== 'audio-error') return;
+      session.roundLog.push({
+        questionId: session.question.id,
+        trackId: session.question.track.id,
+        type: session.question.type,
+        correctIndex: session.question.answerIndex,
+        skipped: true,
+        players: session.players.map(player => ({ playerId: player.id, answer: null, correct: false, points: 0, skipped: true }))
+      });
+      if (this.isSessionFinished()) this.finishSession();
+      else {
+        session.questionIndex += 1;
+        this.prepareQuestion();
       }
     }
 
@@ -667,41 +977,55 @@
       const type = QUESTION_TYPES[q.type];
       const totalQuestions = session.config.mode === 'endless' ? null : session.config.questionCount;
       const progress = totalQuestions ? (session.questionIndex + (session.phase === 'reveal' ? 1 : 0)) / totalQuestions : 0;
-      const phaseLabel = session.phase === 'loading' ? 'SYNTHÈSE DU SIGNAL…' : session.phase === 'reveal' ? 'RÉVÉLATION' : 'RÉPONDEZ MAINTENANT';
+      const phaseLabel = session.phase === 'loading'
+        ? 'SYNTHÈSE DU SIGNAL…'
+        : session.phase === 'reveal' ? 'RÉVÉLATION'
+          : session.phase === 'paused' ? 'PARTIE EN PAUSE'
+            : session.phase === 'audio-error' ? 'SIGNAL INDISPONIBLE'
+              : 'RÉPONDEZ MAINTENANT';
       const correctOption = session.phase === 'reveal' ? q.answerIndex : -1;
 
       this.setScreen('game', `
         <section class="game-shell ${session.phase === 'reveal' ? 'is-reveal' : ''}">
           <header class="game-hud panel">
-            <button class="game-exit" data-action="abandon-game" title="Quitter la partie">×</button>
+            <button class="game-exit" data-action="abandon-game" aria-label="Abandonner la partie" title="Abandonner la partie">×</button>
             <div class="round-progress">
               <span>${totalQuestions ? `QUESTION ${session.questionIndex + 1} / ${totalQuestions}` : `FAILLE ${session.questionIndex + 1}`}</span>
               <div><i style="--progress:${totalQuestions ? progress : Math.min(1, session.questionIndex / 25)}"></i></div>
             </div>
             <div class="round-type"><span>${type.icon}</span><div><small>MANCHE</small><strong>${type.label}</strong></div></div>
-            <div class="timer-wrap ${this.remainingMs < 3000 && session.phase === 'answering' ? 'danger' : ''}">
+            <div class="timer-wrap ${this.remainingMs < 3000 && session.phase === 'answering' ? 'danger' : ''}" role="timer" aria-label="${Math.ceil(this.remainingMs / 1000)} secondes restantes">
               <svg viewBox="0 0 44 44" aria-hidden="true"><circle cx="22" cy="22" r="18"></circle><circle class="timer-ring" cx="22" cy="22" r="18" style="--timer:${clamp(this.remainingMs / (q.timer * 1000), 0, 1)}"></circle></svg>
               <strong id="timer-value">${session.phase === 'loading' ? '…' : Math.ceil(this.remainingMs / 1000)}</strong>
             </div>
           </header>
 
           <div class="question-panel panel">
-            <div class="question-status"><span class="status-pulse"></span>${phaseLabel}${q.fractureLabel && session.phase === 'reveal' ? ` · ${q.fractureLabel}` : ''}</div>
+            <div id="game-status" class="question-status" role="status" aria-live="polite"><span class="status-pulse"></span>${phaseLabel}${q.fractureLabel && session.phase === 'reveal' ? ` · ${q.fractureLabel}` : ''}</div>
             <h1>${escapeHtml(q.prompt)}</h1>
             <p>${escapeHtml(q.hint)}</p>
             <div class="visualizer-wrap">
-              <canvas id="audio-visualizer" aria-label="Visualisation du signal audio"></canvas>
+              <canvas id="audio-visualizer" class="${this.settings.visualizer && !this.settings.reducedMotion ? '' : 'visualizer-disabled'}" aria-label="Visualisation décorative du signal audio"></canvas>
               <div class="signal-core"><span>${session.phase === 'loading' ? '⌛' : session.phase === 'reveal' ? '✓' : type.icon}</span></div>
             </div>
+            ${session.phase === 'paused' ? '<div class="game-interruption"><p>Le chronomètre est suspendu. Relance l’extrait quand tu es prêt.</p><button class="button primary" data-action="retry-audio">Reprendre le signal</button></div>' : ''}
+            ${session.phase === 'audio-error' ? `<div class="game-interruption error" role="alert"><p>Impossible de lire ce signal : ${escapeHtml(this.audioError || 'erreur audio inconnue')}.</p><div><button class="button primary" data-action="retry-audio">Réessayer</button><button class="button ghost" data-action="skip-audio">Passer sans pénalité</button><button class="text-button" data-action="pause-home">Retour à l’accueil</button></div></div>` : ''}
             <div class="audio-controls">
               <span>↻ RÉÉCOUTE DISPONIBLE AVEC LE MODULE BOUCLE</span>
               <span>${q.track.sourceType === 'custom' ? 'FICHIER PERSONNEL' : 'SIGNAL ORIGINAL GÉNÉRÉ EN TEMPS RÉEL'}</span>
             </div>
           </div>
 
+          ${session.players.length > 1 && session.phase === 'answering' ? `
+            <div class="touch-player-selector" role="group" aria-label="Joueur répondant au toucher">
+              <span>TACTILE · CHOISIS LE JOUEUR</span>
+              ${session.players.map((player, index) => `<button data-action="touch-player" data-player="${index}" aria-pressed="${this.touchPlayerIndex === index}" class="${this.touchPlayerIndex === index ? 'active' : ''}" ${player.answer != null ? 'disabled' : ''} style="--player:${player.color}">J${index + 1} · ${escapeHtml(player.name)}</button>`).join('')}
+            </div>
+          ` : ''}
+
           <div class="answer-grid">
             ${q.options.map((option, index) => {
-              const playerMarkers = session.players.filter(player => player.answer === index);
+              const playerMarkers = session.phase === 'reveal' ? session.players.filter(player => player.answer === index) : [];
               const wrongSelected = session.phase === 'reveal' && playerMarkers.length && index !== correctOption;
               const classes = [
                 'answer-portal',
@@ -711,7 +1035,7 @@
                 session.phase === 'reveal' && index !== correctOption && !wrongSelected ? 'dimmed' : ''
               ].filter(Boolean).join(' ');
               return `
-                <button class="${classes}" data-action="answer" data-option="${index}" ${session.phase !== 'answering' ? 'disabled' : ''}>
+                <button class="${classes}" data-action="answer" data-option="${index}" aria-label="Réponse ${index + 1} : ${escapeHtml(option.label)}${session.phase === 'reveal' ? (index === correctOption ? '. Bonne réponse.' : wrongSelected ? '. Réponse incorrecte sélectionnée.' : '. Réponse incorrecte.') : ''}" ${session.phase !== 'answering' ? 'disabled' : ''}>
                   <span class="portal-index">${index + 1}</span>
                   <span class="portal-icon">${escapeHtml(option.icon || '♫')}</span>
                   <span class="portal-copy"><strong>${escapeHtml(option.label)}</strong><small>${escapeHtml(option.sublabel || '')}</small></span>
@@ -778,15 +1102,16 @@
       `;
     }
 
-    startTimer(seconds) {
+    startTimer(seconds, initialRemainingMs = seconds * 1000) {
       this.cancelTimer();
       this.timerDuration = seconds * 1000;
-      this.remainingMs = this.timerDuration;
+      this.remainingMs = clamp(Number(initialRemainingMs) || this.timerDuration, 1000, this.timerDuration);
       this.timerStart = performance.now();
+      const startingRemaining = this.remainingMs;
       const tick = now => {
         if (!this.session || this.session.phase !== 'answering') return;
         const elapsed = now - this.timerStart;
-        this.remainingMs = Math.max(0, this.timerDuration - elapsed);
+        this.remainingMs = Math.max(0, startingRemaining - elapsed);
         this.updateTimerDom();
         if (this.remainingMs <= 0) {
           this.revealQuestion();
@@ -803,12 +1128,17 @@
       const wrap = document.querySelector('.timer-wrap');
       if (value && this.session) value.textContent = this.session.phase === 'loading' ? '…' : String(Math.ceil(this.remainingMs / 1000));
       if (ring && this.timerDuration) ring.style.setProperty('--timer', String(clamp(this.remainingMs / this.timerDuration, 0, 1)));
-      if (wrap) wrap.classList.toggle('danger', this.remainingMs < 3000 && this.session && this.session.phase === 'answering');
+      if (wrap) {
+        wrap.classList.toggle('danger', this.remainingMs < 3000 && this.session && this.session.phase === 'answering');
+        wrap.setAttribute('aria-label', `${Math.ceil(this.remainingMs / 1000)} secondes restantes`);
+      }
     }
 
     cancelTimer() {
       if (this.timerFrame) cancelAnimationFrame(this.timerFrame);
       this.timerFrame = 0;
+      if (this.revealTimeout) clearTimeout(this.revealTimeout);
+      this.revealTimeout = 0;
     }
 
     submitAnswer(playerIndex, optionIndex) {
@@ -822,9 +1152,14 @@
       }
       player.answer = optionIndex;
       player.answerElapsed = this.timerDuration - this.remainingMs;
+      if (session.players.length > 1 && this.touchPlayerIndex === playerIndex) {
+        const nextPlayer = session.players.findIndex(item => item.answer == null);
+        if (nextPlayer >= 0) this.touchPlayerIndex = nextPlayer;
+      }
       this.renderGame();
+      this.persistActiveSession();
       if (session.players.every(item => item.answer != null)) {
-        setTimeout(() => this.revealQuestion(), 450);
+        this.revealTimeout = setTimeout(() => this.revealQuestion(), 450);
       }
     }
 
@@ -847,6 +1182,7 @@
         Audio.replay().catch(error => this.toast(error.message, 'error'));
       }
       this.renderGame();
+      this.persistActiveSession();
     }
 
     revealQuestion() {
@@ -874,20 +1210,26 @@
           player.correct += 1;
           player.bestCombo = Math.max(player.bestCombo, player.combo);
           session.maximumStreak = Math.max(session.maximumStreak, player.combo);
-          if (elapsed < 2000) session.fastCorrect = true;
+          if (elapsed < 2000) {
+            session.fastCorrect = true;
+            player.fastCorrect = true;
+          }
         } else {
           let penalty = session.config.difficulty === 'expert' ? 160 : 80;
           if (player.doubleActive) penalty *= 2;
-          if (player.shieldActive) penalty = 0;
+          const shielded = player.shieldActive;
+          if (shielded) {
+            penalty = 0;
+            player.shieldActive = false;
+          }
           points = -penalty;
           player.score = Math.max(0, player.score - penalty);
           player.combo = 0;
           player.wrong += 1;
-          session.perfect = false;
-          if (player.lives != null) player.lives = Math.max(0, player.lives - 1);
+          player.perfect = false;
+          if (player.lives != null && !shielded) player.lives = Math.max(0, player.lives - 1);
         }
         player.doubleActive = false;
-        player.shieldActive = false;
         playerResults.push({ playerId: player.id, answer: player.answer, correct, points });
       });
 
@@ -898,6 +1240,7 @@
         correctIndex: q.answerIndex,
         players: playerResults
       });
+      this.persistActiveSession();
       this.renderGame();
       if (this.settings.screenShake && playerResults.some(item => !item.correct)) {
         document.body.classList.add('shake');
@@ -931,11 +1274,11 @@
         }
       };
       unlock('first-game');
-      if (session.maximumStreak >= 5) unlock('streak-5');
-      if (session.perfect) unlock('perfect');
-      if (session.fastCorrect) unlock('speed');
+      if (primaryPlayer.bestCombo >= 5) unlock('streak-5');
+      if (primaryPlayer.perfect) unlock('perfect');
+      if (primaryPlayer.fastCorrect) unlock('speed');
       if (this.profile.discovered.length >= 25) unlock('discover-25');
-      if (session.campaignSector && session.campaignSector.id === 'sector-core') unlock('campaign-clear');
+      if (session.campaignSector && session.campaignSector.id === 'sector-core' && Number((this.profile.campaign['sector-core'] || {}).stars || 0) > 0) unlock('campaign-clear');
       return newlyUnlocked.filter(Boolean);
     }
 
@@ -958,7 +1301,7 @@
       this.profile.bestScore = Math.max(this.profile.bestScore, primary.score);
       this.profile.bestStreak = Math.max(this.profile.bestStreak, primary.bestCombo);
       const xpAward = Math.round(primary.score * 0.11 + primary.correct * 45);
-      const creditsAward = Math.round(primary.correct * 12 + (session.perfect ? 75 : 0));
+      const creditsAward = Math.round(primary.correct * 12 + (primary.perfect ? 75 : 0));
       const levelsGained = Storage.addXp(this.profile, xpAward);
       this.profile.credits += creditsAward;
 
@@ -975,8 +1318,12 @@
       }
 
       const achievements = this.checkAchievements(session, primary);
-      Storage.saveProfile(this.profile);
+      Storage.clearActiveSession();
+      this.savedSession = null;
+      if (!Storage.saveProfile(this.profile)) this.toast('La progression n’a pas pu être enregistrée sur cet appareil.', 'warning');
       this.updateProfileChip();
+      this.lastCompletedSession = session;
+      this.session = null;
       this.renderResults({ ranking, xpAward, creditsAward, levelsGained, achievements, campaignResult, session });
     }
 
@@ -986,13 +1333,25 @@
       const primary = session.players[0];
       const totalPrimary = primary.correct + primary.wrong;
       const replayMode = session.config.mode;
+      const campaignDefeat = Boolean(campaignResult && campaignResult.stars === 0);
+      const endlessDefeat = session.config.mode === 'endless';
+      const soloDefeat = session.config.mode === 'solo' && totalPrimary > 0 && primary.correct < Math.ceil(totalPrimary / 2);
+      const neutralResult = totalPrimary === 0;
+      const isDefeat = campaignDefeat || endlessDefeat || soloDefeat;
+      const heroPlayer = session.players.length > 1 ? winner : primary;
+      const outcomeTitle = endlessDefeat
+        ? 'La faille s’est effondrée'
+        : campaignDefeat ? 'Secteur non stabilisé'
+          : soloDefeat ? 'Signal perdu'
+            : neutralResult ? 'Session interrompue'
+              : session.players.length > 1 ? `${escapeHtml(winner.name)} stabilise la faille` : 'Faille stabilisée';
       this.setScreen('results', `
         <section class="results-page">
-          <div class="results-hero panel">
-            <span class="kicker">SESSION TERMINÉE</span>
+          <div class="results-hero panel ${isDefeat ? 'defeat' : neutralResult ? 'neutral' : 'victory'}">
+            <span class="kicker">${isDefeat ? 'ÉCHEC DE STABILISATION' : neutralResult ? 'SESSION SANS PÉNALITÉ' : 'SESSION TERMINÉE'}</span>
             <div class="winner-orb"><i></i><span>${session.players.length > 1 ? 'J' + (winner.id + 1) : '✦'}</span></div>
-            <h1>${session.players.length > 1 ? `${escapeHtml(winner.name)} stabilise la faille` : 'Faille stabilisée'}</h1>
-            <p>${primary.correct} bonnes réponses sur ${totalPrimary} · meilleure série ×${primary.bestCombo}</p>
+            <h1>${outcomeTitle}</h1>
+            <p>${heroPlayer.correct} bonnes réponses sur ${heroPlayer.correct + heroPlayer.wrong} · meilleure série ×${heroPlayer.bestCombo}</p>
             ${campaignResult ? `<div class="star-result" aria-label="${campaignResult.stars} étoiles sur 3">${[0, 1, 2].map(index => `<span class="${index < campaignResult.stars ? 'earned' : ''}">★</span>`).join('')}</div>` : ''}
           </div>
 
@@ -1007,7 +1366,7 @@
             </section>
 
             <section class="panel rewards-panel">
-              <div class="panel-heading"><div><span class="kicker">RÉCOMPENSES</span><h2>Progression</h2></div></div>
+              <div class="panel-heading"><div><span class="kicker">RÉCOMPENSES DU PROFIL</span><h2>Progression de ${escapeHtml(primary.name)}</h2></div></div>
               <div class="reward-row"><span>✦</span><div><strong>+${formatNumber(xpAward)} XP</strong><small>Expérience de profil</small></div></div>
               <div class="reward-row"><span>◈</span><div><strong>+${formatNumber(creditsAward)}</strong><small>Fragments d’Archive</small></div></div>
               ${levelsGained ? `<div class="level-up">NIVEAU SUPÉRIEUR · ${this.profile.level}</div>` : ''}
@@ -1061,7 +1420,7 @@
                 </div>
                 <div class="sector-score">
                   <div class="mini-stars">${[0, 1, 2].map(star => `<span class="${star < result.stars ? 'earned' : ''}">★</span>`).join('')}</div>
-                  <small>MEILLEUR : ${formatNumber(result.best)}</small>
+                  <small>OBJECTIF 1★ : ${formatNumber(sector.target[0])} · MEILLEUR : ${formatNumber(result.best)}</small>
                   <button class="button ${unlocked ? 'primary' : 'ghost'}" data-action="start-sector" data-sector="${sector.id}" ${unlocked ? '' : 'disabled'}>${result.stars ? 'Rejouer' : 'Entrer'} →</button>
                 </div>
               </article>
@@ -1110,7 +1469,7 @@
           <div><span class="kicker">ENTRAÎNEMENT</span><h1>Musée sonore</h1><p>Écoute librement les échos pour apprendre leurs titres avant une partie experte.</p></div>
         </section>
         <section class="archive-toolbar panel">
-          <label class="search-field"><span>⌕</span><input id="archive-search" type="search" placeholder="Rechercher un titre ou un artiste…" value="${escapeHtml(this.archiveFilter.query)}"></label>
+          <label class="search-field"><span class="sr-only">Rechercher dans le Musée sonore</span><span aria-hidden="true">⌕</span><input id="archive-search" type="search" placeholder="Rechercher un titre ou un artiste…" value="${escapeHtml(this.archiveFilter.query)}"></label>
           <label>Univers<select id="archive-category"><option value="all">Tous</option>${Object.values(CATEGORIES).map(category => `<option value="${category.id}" ${this.archiveFilter.category === category.id ? 'selected' : ''}>${category.label}</option>`).join('')}</select></label>
           <label>Source<select id="archive-source"><option value="all">Toutes</option><option value="builtin" ${this.archiveFilter.source === 'builtin' ? 'selected' : ''}>Originale</option><option value="custom" ${this.archiveFilter.source === 'custom' ? 'selected' : ''}>Personnelle</option></select></label>
           <span class="archive-count">${filtered.length} échos</span>
@@ -1121,7 +1480,7 @@
             const discovered = track.sourceType === 'custom' || discoveredSet.has(track.id);
             return `
               <article class="track-card panel ${discovered ? 'discovered' : ''}" style="--accent:${category ? category.accent : '#f5f7ff'}">
-                <button class="track-play ${this.previewTrackId === track.id ? 'playing' : ''}" data-action="preview-track" data-track="${track.id}" aria-label="Écouter ${escapeHtml(track.title)}"><span>${this.previewTrackId === track.id ? '■' : '▶'}</span></button>
+                <button class="track-play ${this.previewTrackId === track.id ? 'playing' : ''}" data-action="preview-track" data-track="${track.id}" aria-pressed="${this.previewTrackId === track.id}" aria-label="${this.previewTrackId === track.id ? 'Arrêter' : 'Écouter'} ${escapeHtml(track.title)}"><span aria-hidden="true">${this.previewTrackId === track.id ? '■' : '▶'}</span></button>
                 <div class="track-symbol">${category ? category.icon : '♫'}</div>
                 <div class="track-copy"><small>${category ? category.label : 'Bibliothèque personnelle'}</small><strong>${escapeHtml(track.title)}</strong><span>${escapeHtml(track.artist || 'Bibliothèque personnelle')}</span></div>
                 <div class="track-meta"><span>${track.kind === 'sfx' ? 'BRUIT' : track.sourceType === 'custom' ? 'IMPORT' : `${track.bpm || '—'} BPM`}</span><span>${'◆'.repeat(Math.min(5, track.difficulty || 2))}</span></div>
@@ -1144,7 +1503,15 @@
       this.previewTrackId = id;
       this.renderArchive();
       try {
-        await Audio.play(track, { duration: Math.min(8, track.duration || 8) });
+        const playback = await Audio.play(track, { duration: Math.min(8, track.duration || 8) });
+        if (playback && playback.source) {
+          playback.source.addEventListener('ended', () => {
+            if (this.currentScreen === 'archive' && this.previewTrackId === id) {
+              this.previewTrackId = null;
+              this.renderArchive();
+            }
+          }, { once: true });
+        }
       } catch (error) {
         this.previewTrackId = null;
         this.toast(error.message, 'error');
@@ -1167,7 +1534,7 @@
             <input id="audio-import" type="file" accept="audio/*" multiple>
             <span class="drop-icon">＋</span>
             <strong>Ajouter des musiques ou bruitages</strong>
-            <small>MP3, WAV, OGG, M4A et formats acceptés par ton navigateur</small>
+            <small>MP3, WAV, OGG, M4A et formats acceptés par ton navigateur · 100 Mo maximum par fichier</small>
             <b>${this.customTracks.length} / 4 minimum</b>
           </label>
           <aside class="panel library-status">
@@ -1186,11 +1553,11 @@
               ${this.customTracks.map((track, index) => `
                 <article class="custom-track-row" data-track-row="${track.id}">
                   <span class="custom-index">${String(index + 1).padStart(2, '0')}</span>
-                  <button class="mini-play" data-action="preview-custom" data-track="${track.id}" title="Écouter">▶</button>
+                  <button class="mini-play" data-action="preview-custom" data-track="${track.id}" aria-label="Écouter ${escapeHtml(track.title)}" title="Écouter">▶</button>
                   <label>Titre<input data-custom-field="title" value="${escapeHtml(track.title)}" maxlength="80"></label>
                   <label>Artiste / œuvre<input data-custom-field="artist" value="${escapeHtml(track.artist || '')}" maxlength="80"></label>
-                  <button class="icon-button" data-action="save-custom" data-track="${track.id}" title="Enregistrer">✓</button>
-                  <button class="icon-button danger" data-action="delete-custom" data-track="${track.id}" title="Supprimer">×</button>
+                  <button class="icon-button" data-action="save-custom" data-track="${track.id}" aria-label="Enregistrer les métadonnées de ${escapeHtml(track.title)}" title="Enregistrer">✓</button>
+                  <button class="icon-button danger" data-action="delete-custom" data-track="${track.id}" aria-label="Supprimer ${escapeHtml(track.title)}" title="Supprimer">×</button>
                 </article>
               `).join('')}
             </div>
@@ -1202,7 +1569,7 @@
 
     async importAudioFiles(files) {
       if (this.pendingImport) return;
-      const list = Array.from(files || []).filter(file => file.type && file.type.startsWith('audio/'));
+      const list = Array.from(files || []).filter(Storage.isSupportedAudioFile);
       if (!list.length) {
         this.toast('Aucun fichier audio compatible sélectionné.', 'warning');
         return;
@@ -1353,11 +1720,11 @@
         this.settings.reducedMotion = data.get('reduced-motion') === 'on';
         this.settings.highContrast = data.get('high-contrast') === 'on';
         this.settings.screenShake = data.get('screen-shake') === 'on';
-        Storage.saveProfile(this.profile);
-        Storage.saveSettings(this.settings);
+        const profileSaved = Storage.saveProfile(this.profile);
+        const settingsSaved = Storage.saveSettings(this.settings);
         this.applySettings();
         this.updateProfileChip();
-        this.toast('Paramètres enregistrés.', 'success');
+        this.toast(profileSaved && settingsSaved ? 'Paramètres enregistrés.' : 'Paramètres appliqués, mais le stockage local est indisponible.', profileSaved && settingsSaved ? 'success' : 'warning');
         this.renderHome();
       });
     }
@@ -1371,7 +1738,7 @@
     }
 
     replaySession() {
-      const old = this.session;
+      const old = this.session || this.lastCompletedSession;
       if (!old) {
         this.renderHome();
         return;
@@ -1387,6 +1754,8 @@
       this.cancelTimer();
       Audio.stop();
       this.session = null;
+      Storage.clearActiveSession();
+      this.savedSession = null;
       this.renderHome();
     }
 
@@ -1396,15 +1765,24 @@
       const action = actionElement.dataset.action;
       if (actionElement.disabled) return;
       switch (action) {
-        case 'home': this.renderHome(); break;
-        case 'settings': this.renderSettings(); break;
+        case 'home': if (!this.pauseSessionForNavigation('home')) this.renderHome(); break;
+        case 'settings': if (!this.pauseSessionForNavigation('settings')) this.renderSettings(); break;
+        case 'onboarding-audio': this.testOnboardingAudio(); break;
+        case 'onboarding-play': this.completeOnboarding(true); break;
+        case 'onboarding-home': this.completeOnboarding(false); break;
+        case 'resume-session': this.resumeSavedSession(); break;
+        case 'discard-session': this.discardSavedSession(); break;
         case 'setup': this.renderSetup(actionElement.dataset.mode || 'solo'); break;
         case 'campaign': this.renderCampaign(); break;
         case 'archive': this.renderArchive(); break;
         case 'workshop': this.renderWorkshop(); break;
         case 'help': this.renderHelp(); break;
-        case 'answer': this.submitAnswer(0, Number(actionElement.dataset.option)); break;
+        case 'answer': this.submitAnswer(this.session && this.session.players.length > 1 ? this.touchPlayerIndex : 0, Number(actionElement.dataset.option)); break;
+        case 'touch-player': this.touchPlayerIndex = Number(actionElement.dataset.player); this.renderGame(); break;
         case 'module': this.activateModule(Number(actionElement.dataset.player), actionElement.dataset.module); break;
+        case 'retry-audio': this.retryQuestionAudio(); break;
+        case 'skip-audio': this.skipAudioQuestion(); break;
+        case 'pause-home': this.pauseSessionForNavigation('home'); break;
         case 'replay-shared': Audio.replay().catch(error => this.toast(error.message, 'error')); break;
         case 'next-question': this.nextQuestion(); break;
         case 'abandon-game': this.abandonGame(); break;
@@ -1494,7 +1872,8 @@
           this.gamepadState.set(index, current);
         }
       }
-      requestAnimationFrame(() => this.pollGamepads());
+      if (this.currentScreen === 'game') requestAnimationFrame(() => this.pollGamepads());
+      else setTimeout(() => this.pollGamepads(), 250);
     }
   }
 
